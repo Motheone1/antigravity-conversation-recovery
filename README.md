@@ -8,6 +8,12 @@ This project rebuilds Antigravity's sidebar index from data that still exists on
 
 Based on the original work by Salar, this repository is a refined version with safer macOS behavior, clearer recovery guardrails, and cross-platform documentation.
 
+## Original Author Credit
+
+Original project and initial release by Salar.
+
+This repository builds on that work and refines it for safer macOS recovery, clearer public documentation, and stronger backup guardrails.
+
 ## What This Solves
 
 | Problem | Status |
@@ -117,12 +123,6 @@ The script found the raw conversation on disk, but not enough validated sidebar 
 ## Publishing Notes
 
 Do not commit local backup files such as `state.vscdb.backup.*` or `trajectorySummaries_backup.*`. They are user-specific recovery artifacts and are ignored by [.gitignore](.gitignore).
-
-## Attribution
-
-Original project and initial release by Salar.
-
-This version keeps that foundation and refines it for safer public use, especially on macOS where sidebar metadata can be more complex.
 
 ## License
 
