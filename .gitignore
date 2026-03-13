@@ -1,0 +1,5 @@
+state.vscdb.backup.*
+state.vscdb.experimental
+trajectorySummaries_backup.*
+*.vscdb-journal
+*.sqlite-journal

@@ -10,33 +10,76 @@ Fixes:
   - Missing/placeholder titles
 
 Usage:
-  1. CLOSE Antigravity completely (File > Exit, or kill from Task Manager)
-  2. Run this script (or use run.bat)
-  3. REBOOT your PC (full restart, not just app restart)
-  4. Open Antigravity — your conversations should appear, sorted by date
+  1. CLOSE Antigravity completely
+  2. Run this script (or use run.bat on Windows)
+  3. Restart Antigravity
+  4. Your conversations should appear, sorted by date
 
 Requirements: Python 3.7+ (no external packages needed)
 License: MIT
 """
 
-import sqlite3
 import base64
 import os
+import shutil
+import sqlite3
 import sys
 import time
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
-DB_PATH = os.path.expandvars(
-    r"%APPDATA%\antigravity\User\globalStorage\state.vscdb"
-)
-CONVERSATIONS_DIR = os.path.expandvars(
-    r"%USERPROFILE%\.gemini\antigravity\conversations"
-)
-BRAIN_DIR = os.path.expandvars(
-    r"%USERPROFILE%\.gemini\antigravity\brain"
-)
-BACKUP_FILENAME = "trajectorySummaries_backup.txt"
+TRAJECTORY_BACKUP_PREFIX = "trajectorySummaries_backup"
+DB_BACKUP_PREFIX = "state.vscdb.backup"
+
+
+def expand_path(path_value):
+    """Expand env vars and ~ in either Windows or POSIX style."""
+    if not path_value:
+        return path_value
+
+    expanded = os.path.expandvars(path_value)
+
+    if "%" in expanded:
+        for key, value in os.environ.items():
+            expanded = expanded.replace(f"%{key}%", value)
+
+    return os.path.expanduser(expanded)
+
+
+def resolve_paths():
+    """Return the best-known Antigravity paths for the current platform."""
+    home = os.path.expanduser("~")
+    conversations_dir = os.path.join(home, ".gemini", "antigravity", "conversations")
+    brain_dir = os.path.join(home, ".gemini", "antigravity", "brain")
+
+    if sys.platform == "darwin":
+        db_path = os.path.join(
+            home,
+            "Library",
+            "Application Support",
+            "antigravity",
+            "User",
+            "globalStorage",
+            "state.vscdb",
+        )
+    elif os.name == "nt":
+        db_path = expand_path(r"%APPDATA%\antigravity\User\globalStorage\state.vscdb")
+        conversations_dir = expand_path(r"%USERPROFILE%\.gemini\antigravity\conversations")
+        brain_dir = expand_path(r"%USERPROFILE%\.gemini\antigravity\brain")
+    else:
+        db_path = os.path.join(
+            home,
+            ".config",
+            "antigravity",
+            "User",
+            "globalStorage",
+            "state.vscdb",
+        )
+
+    return db_path, conversations_dir, brain_dir
+
+
+DB_PATH, CONVERSATIONS_DIR, BRAIN_DIR = resolve_paths()
 
 
 # ─── Protobuf Varint Helpers ─────────────────────────────────────────────────
@@ -79,13 +122,12 @@ def encode_string_field(field_number, string_value):
 
 # ─── Title Extraction ────────────────────────────────────────────────────────
 
-def extract_existing_titles(db_path):
+def extract_existing_entries(db_path):
     """
-    Read titles already stored in the database's trajectory data.
-    These are preserved so re-running the script doesn't lose app-generated titles.
-    Returns a dict of {conversation_id: title}.
+    Read complete trajectory entries already stored in the database.
+    Returns a dict of {conversation_id: {"title": str, "entry": bytes}}.
     """
-    titles = {}
+    entries = {}
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
@@ -97,7 +139,7 @@ def extract_existing_titles(db_path):
         conn.close()
 
         if not row or not row[0]:
-            return titles
+            return entries
 
         decoded = base64.b64decode(row[0])
         pos = 0
@@ -113,7 +155,7 @@ def extract_existing_titles(db_path):
             entry = decoded[pos:pos + length]
             pos += length
 
-            # Parse each entry for UUID (field 1) and info blob (field 2)
+            # Parse each entry for UUID (field 1) and info blob (field 2).
             ep, uid, info_b64 = 0, None, None
             while ep < len(entry):
                 t, ep = decode_varint(entry, ep)
@@ -141,16 +183,14 @@ def extract_existing_titles(db_path):
                     _, ip = decode_varint(info_data, ip)
                     il, ip = decode_varint(info_data, ip)
                     title = info_data[ip:ip + il].decode('utf-8', errors='replace')
-                    # Only keep real titles (skip fallback placeholders)
-                    if not title.startswith("Conversation (") and not title.startswith("Conversation "):
-                        titles[uid] = title
+                    entries[uid] = {"title": title, "entry": entry}
                 except Exception:
                     pass
 
     except Exception:
         pass
 
-    return titles
+    return entries
 
 
 def get_title_from_brain(conversation_id):
@@ -177,7 +217,7 @@ def get_title_from_brain(conversation_id):
     return None
 
 
-def resolve_title(conversation_id, existing_titles):
+def resolve_title(conversation_id, existing_entries):
     """
     Determine the best title for a conversation. Priority:
       1. Brain artifact .md heading
@@ -191,8 +231,8 @@ def resolve_title(conversation_id, existing_titles):
         return brain_title, "brain"
 
     # Priority 2: Existing title from database
-    if conversation_id in existing_titles:
-        return existing_titles[conversation_id], "preserved"
+    if conversation_id in existing_entries:
+        return existing_entries[conversation_id]["title"], "preserved"
 
     # Priority 3: Fallback with date
     conv_file = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.pb")
@@ -222,6 +262,55 @@ def build_trajectory_entry(conversation_id, title):
     return entry
 
 
+def build_index_from_existing_entries(conversation_ids, existing_entries):
+    """
+    Reorder only complete trajectory entries that already exist.
+    Conversations without a complete stored entry are skipped for safety.
+    Returns (encoded_bytes, skipped_ids, stats).
+    """
+    result = b""
+    skipped_ids = []
+    stats = {"brain": 0, "preserved": 0, "fallback": 0}
+    markers = {"brain": "+", "preserved": "~", "fallback": "?"}
+
+    print("  Building conversation index (newest first):")
+    print("  " + "-" * 58)
+
+    for i, cid in enumerate(conversation_ids, 1):
+        title, source = resolve_title(cid, existing_entries)
+        marker = markers[source]
+
+        if cid not in existing_entries:
+            skipped_ids.append(cid)
+            print(f"    [{i:3d}] ! {title[:55]} (skipped: missing full metadata)")
+            continue
+
+        result += encode_length_delimited(1, existing_entries[cid]["entry"])
+        stats[source] += 1
+        print(f"    [{i:3d}] {marker} {title[:55]}")
+
+    return result, skipped_ids, stats
+
+
+def create_backups(db_path, existing_value):
+    """Create full-database and trajectory backups before any write."""
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    db_backup_path = os.path.join(script_dir, f"{DB_BACKUP_PREFIX}.{timestamp}")
+    shutil.copy2(db_path, db_backup_path)
+
+    trajectory_backup_path = None
+    if existing_value:
+        trajectory_backup_path = os.path.join(
+            script_dir, f"{TRAJECTORY_BACKUP_PREFIX}.{timestamp}.txt"
+        )
+        with open(trajectory_backup_path, "w", encoding="utf-8") as f:
+            f.write(existing_value)
+
+    return db_backup_path, trajectory_backup_path
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -230,6 +319,10 @@ def main():
     print("   Antigravity Conversation Fix")
     print("   Rebuilds your conversation index — sorted by date")
     print("=" * 62)
+    print()
+    print(f"  Database path: {DB_PATH}")
+    print(f"  Conversations: {CONVERSATIONS_DIR}")
+    print(f"  Brain folder:  {BRAIN_DIR}")
     print()
 
     # ── Validate paths ──────────────────────────────────────────────────────
@@ -269,32 +362,39 @@ def main():
 
     # ── Preserve existing titles ────────────────────────────────────────────
 
-    print("  Reading existing titles from database...")
-    existing_titles = extract_existing_titles(DB_PATH)
-    print(f"  Found {len(existing_titles)} existing titles to preserve")
+    print("  Reading existing entries from database...")
+    existing_entries = extract_existing_entries(DB_PATH)
+    print(f"  Found {len(existing_entries)} complete entries to preserve")
     print()
 
     # ── Build the new index ─────────────────────────────────────────────────
 
-    print("  Building conversation index (newest first):")
-    print("  " + "-" * 58)
-
-    result = b""
-    stats = {"brain": 0, "preserved": 0, "fallback": 0}
-    markers = {"brain": "+", "preserved": "~", "fallback": "?"}
-
-    for i, cid in enumerate(conversation_ids, 1):
-        title, source = resolve_title(cid, existing_titles)
-        entry = build_trajectory_entry(cid, title)
-        result += encode_length_delimited(1, entry)
-        stats[source] += 1
-        marker = markers[source]
-        print(f"    [{i:3d}] {marker} {title[:55]}")
+    result, skipped_ids, stats = build_index_from_existing_entries(
+        conversation_ids, existing_entries
+    )
 
     print("  " + "-" * 58)
-    print(f"  Legend: [+] brain artifact  [~] preserved  [?] date fallback")
-    print(f"  Totals: {stats['brain']} from brain, {stats['preserved']} preserved, {stats['fallback']} fallback")
+    print("  Legend: [+] brain artifact  [~] preserved  [?] fallback  [!] skipped")
+    print(
+        "  Totals: "
+        f"{stats['brain']} from brain, "
+        f"{stats['preserved']} preserved, "
+        f"{stats['fallback']} fallback, "
+        f"{len(skipped_ids)} skipped"
+    )
     print()
+
+    if skipped_ids:
+        print("  Safety stop: some conversations exist on disk but do not have")
+        print("  complete sidebar metadata in the current database.")
+        print("  No changes were written so nothing is lost.")
+        print()
+        print("  Missing full metadata for:")
+        for cid in skipped_ids:
+            print(f"    - {cid}")
+        print()
+        input("  Press Enter to close...")
+        return 1
 
     # ── Backup current data ─────────────────────────────────────────────────
 
@@ -307,11 +407,13 @@ def main():
     )
     row = cur.fetchone()
 
-    backup_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), BACKUP_FILENAME)
-    if row and row[0]:
-        with open(backup_path, 'w', encoding='utf-8') as f:
-            f.write(row[0])
-        print(f"  Backup saved to: {BACKUP_FILENAME}")
+    db_backup_path, trajectory_backup_path = create_backups(DB_PATH, row[0] if row else None)
+    print(f"  Full database backup saved to: {os.path.basename(db_backup_path)}")
+    if trajectory_backup_path:
+        print(
+            "  Trajectory backup saved to: "
+            f"{os.path.basename(trajectory_backup_path)}"
+        )
 
     # ── Write the new index ─────────────────────────────────────────────────
 
@@ -343,8 +445,8 @@ def main():
     print()
     print("  NEXT STEPS:")
     print("    1. Make sure Antigravity is fully closed")
-    print("    2. REBOOT your PC (full restart, not just app restart)")
-    print("    3. Open Antigravity — conversations should appear sorted by date")
+    print("    2. Reopen Antigravity")
+    print("    3. Conversations should appear sorted by date")
     print()
     input("  Press Enter to close...")
     return 0

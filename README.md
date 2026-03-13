@@ -1,79 +1,129 @@
-# Antigravity Conversation Fix
+# Antigravity Conversation Recovery
 
-Your Antigravity conversation history disappeared? Conversations showing in the wrong order? Titles replaced with placeholder text? This tool fixes all of that.
+### Restore Missing Antigravity Chats on macOS and Windows
 
-## ⚡ Quick Start (Windows)
+Recover missing Antigravity chats, restore sidebar order, and preserve usable titles from local artifacts.
 
-1. Download **`Antigravity_Conversation_Fix.exe`** from the Releases Page
-2. Double-click it — a terminal window will open
-3. If Antigravity is still running, the tool will warn you and ask you to close it first
-4. The tool scans your conversations, rebuilds the index, and shows you the results
-5. Restart your PC, then open Antigravity — your conversations are back, sorted by date
+This project rebuilds Antigravity's sidebar index from data that still exists on disk. It is designed to be safe first: if the script cannot preserve a conversation cleanly, it stops before writing.
 
-> **No Python or developer tools required.** Just download, run, done.
+Based on the original work by Salar, this repository is a refined version with safer macOS behavior, clearer recovery guardrails, and cross-platform documentation.
 
-## What It Fixes
+## What This Solves
 
-| Problem | Fixed? |
+| Problem | Status |
 |---|---|
-| Conversations missing from sidebar | ✅ |
-| Conversations in wrong order | ✅ Sorted newest first |
-| Placeholder titles instead of real names | ✅ Restores from brain artifacts |
-| Titles lost after previous fix attempts | ✅ Preserves existing titles |
+| Conversations missing from the sidebar | Supported |
+| Sidebar order is wrong | Supported |
+| Titles replaced by placeholders | Supported |
+| Existing good titles get overwritten | Prevented |
+| Partial repair causes more data loss | Prevented by backup + safety stop |
+
+## Platform Support
+
+| Platform | Status | Notes |
+|---|---|---|
+| Windows | Supported | Original target |
+| macOS | Supported with safety limits | Stops if full sidebar metadata is missing |
+| Linux | Path detection included | Less tested |
+
+For the macOS-specific safety behavior, see [docs/macos-notes.md](docs/macos-notes.md).
+
+## Quick Start
+
+### Windows
+
+1. Close Antigravity completely.
+2. Run the packaged `.exe` from Releases, or use the source script.
+3. Let the tool scan and rebuild the sidebar index.
+4. Reopen Antigravity and verify the sidebar.
+
+### macOS
+
+1. Close Antigravity completely.
+2. Double-click [run.command](run.command), or run `python3 rebuild_conversations.py`.
+3. If the script reports skipped conversations, stop there and keep the backups.
+4. Reopen Antigravity and verify what returned.
+
+### From Source
+
+```bash
+python3 rebuild_conversations.py
+```
+
+No external dependencies are required. Python 3.7+ is enough.
 
 ## How It Works
 
-Antigravity stores conversation data in two places:
+Antigravity stores conversation state in two places:
 
-- **Conversation files** (`*.pb`) in `%USERPROFILE%\.gemini\antigravity\conversations\`
-- **Sidebar index** in a SQLite database at `%APPDATA%\antigravity\User\globalStorage\state.vscdb`
+- Conversation files on disk
+- A sidebar index inside `state.vscdb`
 
-When the index gets corrupted, conversations still exist on disk but don't show up in the sidebar. This tool scans your conversation files, sorts them by date, pulls titles from brain artifacts, and writes a clean index back to the database.
+The script reads the existing sidebar entries, matches them to local conversation files, sorts them newest-first, and writes the repaired ordering back to the database.
 
-**Title resolution priority:**
-1. Brain artifact `.md` headings (best source)
-2. Titles already in the database (preserved across re-runs)
-3. Fallback: `Conversation (date) short-id`
+Title priority:
 
-## Output Legend
+1. Brain artifact Markdown headings
+2. Existing sidebar title already stored in the database
+3. Date-based fallback title
+
+## Safety Model
+
+Before any write, the script creates:
+
+- A full copy of `state.vscdb`
+- A text backup of the original `trajectorySummaries` value
+
+It also refuses to write if it detects conversations that exist on disk but do not have complete sidebar metadata available in the database. That guard is especially important on macOS.
+
+## Output Markers
 
 | Marker | Meaning |
 |---|---|
-| `[+]` | Title extracted from brain artifact |
-| `[~]` | Title preserved from existing database |
-| `[?]` | Fallback title (no source available) |
+| `[+]` | Title came from a brain artifact |
+| `[~]` | Title came from an existing sidebar entry |
+| `[?]` | Fallback title was used |
+| `[!]` | Conversation was skipped to avoid lossy repair |
 
-## Advanced: Run from Source
+## Repository Layout
 
-If you prefer running the Python script directly (or you're on Mac/Linux):
+| File | Purpose |
+|---|---|
+| [rebuild_conversations.py](rebuild_conversations.py) | Main repair script |
+| [run.bat](run.bat) | Windows launcher |
+| [run.command](run.command) | macOS launcher |
+| [docs/macos-notes.md](docs/macos-notes.md) | macOS limitations and recovery notes |
 
-```bash
-python rebuild_conversations.py
-```
+## Known Limitations
 
-Requires Python 3.7+ with no external packages.
-
-## Safety
-
-- **Automatic backup** — your current index is saved to `trajectorySummaries_backup.txt` before any changes
-- **Non-destructive** — conversation files (`*.pb`) are never modified, only the sidebar index is rebuilt
-- **Idempotent** — safe to run multiple times
+- The tool cannot yet synthesize every missing macOS sidebar entry from raw `.pb` files alone.
+- If Antigravity has already lost the richer metadata for a conversation, the script will preserve safety over completeness.
+- Some conversations may need manual investigation even when their raw files still exist.
 
 ## FAQ
 
-**Q: Do I really need to restart my PC?**
-A: A full restart is the safest way to ensure Antigravity picks up the changes. In most cases, simply closing and reopening Antigravity works too.
+**Do I need to restart my computer?**
 
-**Q: Why do some titles show as "Conversation (Mar 10) abc12345"?**
-A: Those conversations don't have brain artifacts, and their original titles weren't in the database. Future re-runs will preserve any titles the app generates going forward.
+Usually no. Fully closing and reopening Antigravity is normally enough.
 
-**Q: Can I run this while Antigravity is open?**
-A: The tool will detect if Antigravity is running and warn you. It's recommended to close it first so the app doesn't overwrite your fix when it exits.
+**Can I run this while Antigravity is open?**
+
+No. Close it first so the app does not overwrite the repaired index on exit.
+
+**Why was a conversation skipped?**
+
+The script found the raw conversation on disk, but not enough validated sidebar metadata to rebuild it safely.
+
+## Publishing Notes
+
+Do not commit local backup files such as `state.vscdb.backup.*` or `trajectorySummaries_backup.*`. They are user-specific recovery artifacts and are ignored by [.gitignore](.gitignore).
+
+## Attribution
+
+Original project and initial release by Salar.
+
+This version keeps that foundation and refines it for safer public use, especially on macOS where sidebar metadata can be more complex.
 
 ## License
 
-MIT — free to use, share, and modify.
-
----
-
-**⭐ If this fixed your conversations, please star the repo so others can find it!**
+MIT
